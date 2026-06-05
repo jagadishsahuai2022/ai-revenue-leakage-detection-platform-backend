@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.migration-backup
+*.log
+
+# Prisma
+node_modules/.prisma/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,68 @@
+name: Prisma — Migrate Deploy (Production)
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Run demo seed after migration? (true/false) — dev/staging ONLY"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  migrate:
+    name: Apply schema migrations
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+
+      # Mark the full initial-schema migration as already applied so Prisma
+      # does not try to CREATE tables that already exist in production.
+      # Safe to run repeatedly — Prisma ignores it if already resolved.
+      - name: Resolve baseline migration (initial schema already in prod)
+        run: npx prisma migrate resolve --applied "20260228162239_add_data_migration_history" || true
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+
+      - name: Apply schema migrations
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+
+      - name: Migration status
+        run: npx prisma migrate status
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+
+      # Demo seed — only if explicitly requested AND not production environment
+      # This step is intentionally guarded and will never run automatically.
+      - name: Run demo seed (optional, non-production only)
+        if: ${{ github.event.inputs.seed == 'true' && vars.NODE_ENV != 'production' }}
+        run: npm run demo:seed
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          ENABLE_DEMO_DATA: "true"
+          DEMO_COMPANY_SLUG: ${{ vars.DEMO_COMPANY_SLUG || 'demo' }}
+          NODE_ENV: ${{ vars.NODE_ENV || 'staging' }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          JWT_REFRESH_SECRET: ${{ secrets.JWT_REFRESH_SECRET }}

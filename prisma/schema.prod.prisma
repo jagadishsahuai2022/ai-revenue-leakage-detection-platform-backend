@@ -1,0 +1,988 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// RevenueGuard – Prisma Schema
+// Multi-tenant SaaS with company_id isolation, RBAC, Stripe billing
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("PROD_DATABASE_URL")
+}
+
+// ── Enums ────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  SUPER_ADMIN
+  COMPANY_ADMIN
+  ANALYST
+  VIEWER
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  UNPAID
+}
+
+enum SubscriptionPlan {
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+enum LeakageCategory {
+  CHURN
+  DUNNING_FAILURE
+  PRICING_GAP
+  FAILED_UPSELL
+  REFUND
+  DISCOUNT_ABUSE
+  INVOICE_ERROR
+}
+
+enum IntegrationProvider {
+  GITHUB
+  STRIPE
+  SLACK
+  SQUARE
+  PAYPAL
+  SHOPIFY
+  QUICKBOOKS
+  XERO
+  CUSTOM
+}
+
+enum IntegrationStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// ── Company (Tenant) ─────────────────────────────────────────────────────────
+
+model Company {
+  id              String             @id @default(cuid())
+  name            String
+  slug            String             @unique
+  domain          String?            @unique
+  logoUrl         String?
+  subscriptionId  String?            @unique
+  stripeCustomerId String?           @unique
+  plan            SubscriptionPlan   @default(STARTER)
+  subscriptionStatus SubscriptionStatus @default(TRIALING)
+  trialEndsAt     DateTime?
+  billingEmail    String?
+  settings        Json               @default("{}")
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  users              User[]
+  revenues           Revenue[]
+  leakages           RevenueLeakage[]
+  integrations       Integration[]
+  apiKeys            ApiKey[]
+  auditLogs          AuditLog[]
+  invoices           Invoice[]
+  subscriptionItems  SubscriptionItem[]
+  providerConnections ProviderConnection[]
+  revenueEventLogs   RevenueEventLog[]
+  customProviders    CustomProvider[]
+  aiInsights         AIInsight[]
+  aiUsage            AiUsage?
+  aiRecommendations  AIRecommendation[]
+  actionExecutions   ActionExecution[]
+  featureFlags       FeatureFlag[]
+  connectorSyncLogs  ConnectorSyncLog[]
+  connectorHealths   ConnectorHealth[]
+
+  @@index([slug])
+  @@index([stripeCustomerId])
+}
+
+// ── User ─────────────────────────────────────────────────────────────────────
+
+model User {
+  id              String    @id @default(cuid())
+  companyId       String
+  email           String
+  passwordHash    String?
+  name            String
+  avatarUrl       String?
+  role            UserRole  @default(VIEWER)
+  githubId        String?   @unique
+  githubUsername  String?
+  emailVerified   Boolean   @default(false)
+  lastLoginAt     DateTime?
+  isActive        Boolean   @default(true)
+  preferences     Json      @default("{}")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  company                Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  refreshTokens          RefreshToken[]
+  createdCustomProviders CustomProvider[]
+
+  @@unique([companyId, email])
+  @@index([companyId])
+  @@index([email])
+  @@index([githubId])
+}
+
+// ── Refresh Tokens ────────────────────────────────────────────────────────────
+
+model RefreshToken {
+  id          String    @id @default(cuid())
+  userId      String
+  token       String    @unique
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+}
+
+// ── Revenue Record ────────────────────────────────────────────────────────────
+
+model Revenue {
+  id              String    @id @default(cuid())
+  companyId       String
+  externalId      String?
+  customerId      String?
+  customerEmail   String?
+  amount          Decimal   @db.Decimal(14, 2)
+  currency        String    @default("USD") @db.VarChar(3)
+  mrr             Decimal?  @db.Decimal(14, 2)
+  arr             Decimal?  @db.Decimal(14, 2)
+  product         String?
+  plan            String?
+  period          DateTime
+  source          String    @default("manual")
+  metadata        Json      @default("{}")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  company         Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  leakages        RevenueLeakage[]
+
+  @@unique([companyId, externalId])
+  @@index([companyId])
+  @@index([companyId, period])
+  @@index([companyId, customerId])
+  @@index([period])
+}
+
+// ── Revenue Leakage ───────────────────────────────────────────────────────────
+
+model RevenueLeakage {
+  id              String          @id @default(cuid())
+  companyId       String
+  revenueId       String?
+  category        LeakageCategory
+  title           String
+  description     String?
+  amount          Decimal         @db.Decimal(14, 2)
+  currency        String          @default("USD") @db.VarChar(3)
+  riskScore       Int             @default(0)   // 0-100
+  isResolved      Boolean         @default(false)
+  resolvedAt      DateTime?
+  metadata        Json            @default("{}")
+  detectedAt      DateTime        @default(now())
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  company         Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  revenue         Revenue?        @relation(fields: [revenueId], references: [id])
+
+  @@index([companyId])
+  @@index([companyId, category])
+  @@index([companyId, isResolved])
+  @@index([companyId, detectedAt])
+  @@index([riskScore])
+}
+
+// ── Invoice ───────────────────────────────────────────────────────────────────
+
+model Invoice {
+  id                String    @id @default(cuid())
+  companyId         String
+  stripeInvoiceId   String?   @unique
+  stripeCustomerId  String?
+  amount            Decimal   @db.Decimal(14, 2)
+  currency          String    @default("USD") @db.VarChar(3)
+  status            String
+  invoiceUrl        String?
+  periodStart       DateTime?
+  periodEnd         DateTime?
+  paidAt            DateTime?
+  createdAt         DateTime  @default(now())
+
+  company           Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([stripeInvoiceId])
+}
+
+// ── Subscription Item ─────────────────────────────────────────────────────────
+
+model SubscriptionItem {
+  id                    String    @id @default(cuid())
+  companyId             String
+  stripeSubscriptionId  String    @unique
+  stripePriceId         String
+  plan                  SubscriptionPlan
+  status                SubscriptionStatus
+  currentPeriodStart    DateTime
+  currentPeriodEnd      DateTime
+  cancelAtPeriodEnd     Boolean   @default(false)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  company               Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+}
+
+// ── Integration ───────────────────────────────────────────────────────────────
+
+model Integration {
+  id              String              @id @default(cuid())
+  companyId       String
+  provider        IntegrationProvider
+  status          IntegrationStatus   @default(INACTIVE)
+  accessToken     String?
+  refreshToken    String?
+  tokenExpiresAt  DateTime?
+  externalId      String?
+  config          Json                @default("{}")
+  lastSyncAt      DateTime?
+  errorMessage    String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  company         Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, provider])
+  @@index([companyId])
+  @@index([provider])
+}
+
+// ── API Key ───────────────────────────────────────────────────────────────────
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  companyId   String
+  name        String
+  keyHash     String    @unique
+  keyPrefix   String
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  company     Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([keyHash])
+}
+
+// ── Audit Log ─────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id           String    @id @default(cuid())
+  companyId    String
+  // Actor fields (new)
+  actorId      String?   // userId of who performed the action
+  actorEmail   String?
+  actorName    String?
+  // Resource fields
+  action       String
+  resourceType String?   // e.g. "REVENUE_RECORD", "USER", "COMPANY"
+  resourceId   String?
+  detail       String?   // human-readable description
+  // Legacy / extra context
+  resource     String    @default("")
+  ipAddress    String?
+  userAgent    String?
+  metadata     Json      @default("{}")
+  createdAt    DateTime  @default(now())
+
+  /// JSON snapshot of the entity BEFORE the action (null for creates)
+  before       Json?
+  /// JSON snapshot of the entity AFTER the action (null for deletes)
+  after        Json?
+
+  // Relations
+  company      Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  // actorId is NOT a foreign key — actor may be deleted; keep as plain string
+  // Legacy userId kept as alias in application layer
+
+  @@index([companyId])
+  @@index([companyId, action])
+  @@index([companyId, createdAt(sort: Desc)])
+  @@index([actorId])
+}
+
+// ── Data Migration History ────────────────────────────────────────────────────
+// Tracks which data-migration scripts have been executed.
+// Schema migrations use Prisma migrate; this table tracks idempotent
+// data transformations run via scripts/run-data-migrations.ts.
+
+model DataMigrationHistory {
+  id          String   @id @default(cuid())
+  version     String   @unique   // filename without extension, e.g. "001_backfill_mrr"
+  executedAt  DateTime @default(now())
+}
+
+// ── Connector Engine v2 — Provider Connection ─────────────────────────────────
+// Stores per-tenant provider configuration independently of the legacy
+// `Integration` model.  The `Integration` model is kept intact for backward
+// compatibility; `ProviderConnection` is the v2 counterpart.
+
+model ProviderConnection {
+  id              String              @id @default(cuid())
+  companyId       String
+  provider        IntegrationProvider
+  status          IntegrationStatus   @default(INACTIVE)
+  /// Encrypted JSON following the same envelope as `Integration.config`.
+  /// Store only non-sensitive config here; secrets live in a secrets manager.
+  encryptedConfig Json                @default("{}")
+
+  // ── Enterprise Credential Fields (AES-256 encrypted at rest) ──────────
+  /// AES-256-GCM encrypted access token
+  accessToken     String?             @db.Text
+  /// AES-256-GCM encrypted refresh token
+  refreshToken    String?             @db.Text
+  /// AES-256-GCM encrypted API key
+  apiKey          String?             @db.Text
+  /// AES-256-GCM encrypted client secret
+  clientSecret    String?             @db.Text
+  /// Token expiration timestamp (for OAuth flows)
+  expiresAt       DateTime?
+  /// Comma-separated OAuth scopes granted by the provider
+  scopes          String?             @db.Text
+
+  // ── Permission Scopes ────────────────────────────────────────────────
+  /// JSON array of permission scopes: ["READ_ONLY","READ_WRITE","BILLING_ACCESS"]
+  permissions     Json                @default("[]")
+
+  // ── Incremental Sync Support ─────────────────────────────────────────
+  /// Last successful sync timestamp (for incremental fetches)
+  lastSyncAt      DateTime?
+  /// Opaque cursor from the provider for pagination / delta sync
+  syncCursor      String?             @db.Text
+  /// Webhook URL configured for this provider connection
+  webhookUrl      String?             @db.Text
+
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  company         Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, provider])
+  @@index([companyId, provider])
+}
+
+// ── Connector Engine v2 — Connector Event Record ──────────────────────────────
+// Audit log of every event ingested or emitted by the ConnectorEngine.
+// The domain type `ConnectorEvent` (in src/domain/connectors) is the
+// in-memory counterpart; this model persists it.
+//
+// Note: named `ConnectorEventRecord` to avoid collision with the Prisma
+// reserved keyword / domain type named `ConnectorEvent`.
+
+model ConnectorEventRecord {
+  id          String              @id @default(cuid())
+  companyId   String
+  provider    IntegrationProvider
+  eventType   String
+  /// Optional external ID from the provider (e.g. Stripe charge ID).
+  /// Used for idempotency within the (companyId, externalId) scope.
+  externalId  String?
+  rawPayload  Json                @default("{}")
+  processed   Boolean             @default(false)
+  createdAt   DateTime            @default(now())
+
+  @@index([companyId])
+  @@index([companyId, provider])
+  @@index([companyId, eventType])
+  @@index([companyId, externalId])
+}
+
+// ── Connector Engine v2 — Revenue Event Log ───────────────────────────────────
+// Lightweight append-only log that records every significant revenue event
+// flowing through the system (sync summaries, leakage detections, etc.).
+// Used by the AI intelligence layer for time-series analysis.
+
+model RevenueEventLog {
+  id          String    @id @default(cuid())
+  companyId   String
+  /// Semantic event type tag, e.g. "SYNC_COMPLETED", "LEAKAGE_DETECTED"
+  type        String
+  payload     Json      @default("{}")
+  createdAt   DateTime  @default(now())
+
+  company     Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([companyId, type])
+  @@index([companyId, createdAt(sort: Desc)])
+}
+
+// ── Custom Provider (user-defined HTTP API integrations) ────────────────────
+
+model CustomProvider {
+  id             String   @id @default(uuid())
+  companyId      String
+  createdById    String
+  name           String   @db.VarChar(100)
+  description    String   @default("") @db.VarChar(300)
+  iconBg         String   @default("#6b7280") @db.VarChar(7)
+  iconSvgPath    String   @default("") @db.Text
+  /// Which built-in icon preset was selected, e.g. 'stripe'. Empty string = custom SVG.
+  iconPresetKey  String   @default("") @db.VarChar(50)
+  /// 'api_key' | 'bearer' | 'oauth2_pkce'
+  authType       String   @default("api_key")
+  baseUrl        String?  @db.VarChar(500)
+  /// [{key, label, placeholder?, secret?}] — field schema only, no credentials
+  fields         Json     @default("[]")
+  webhookSupport Boolean  @default(false)
+  status         String   @default("DISCONNECTED")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  company    Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy  User    @relation(fields: [createdById], references: [id])
+
+  @@unique([companyId, name])
+  @@index([companyId])
+}
+
+// ── Provider Icon Presets ─────────────────────────────────────────────────────
+/// Persisted catalog of icon presets for built-in and future providers.
+/// Seeded via migration; drives GET /integrations/icons/presets.
+model ProviderIcon {
+  id          String   @id @default(uuid())
+  /// Unique short key, e.g. 'github', 'stripe', 'custom-api'
+  key         String   @unique @db.VarChar(50)
+  label       String   @db.VarChar(100)
+  iconBg      String   @map("icon_bg") @db.VarChar(7)
+  iconSvgPath String   @map("icon_svg_path") @db.Text
+  /// Display order in the picker (lower = first)
+  sortOrder   Int      @default(0) @map("sort_order")
+  isBuiltIn   Boolean  @default(true) @map("is_built_in")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([key])
+  @@map("provider_icons")
+}
+
+// ── Test Credentials ──────────────────────────────────────────────────────────
+/// Global (non-tenant) sandbox credentials used to pre-fill the Connect modal
+/// in dev/staging. Never store production keys here.
+model TestCredential {
+  id          String   @id @default(uuid())
+  /// Lowercase provider key, e.g. 'stripe', 'square', 'paypal'
+  providerId  String   @unique @db.VarChar(50)
+  label       String   @default("Test Credentials") @db.VarChar(100)
+  /// Credential fields keyed to match each provider's field schema
+  credentials Json     @default("{}")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([providerId])
+  @@index([isActive])
+  @@map("test_credentials")
+}
+
+// ── AI Model Catalogue ───────────────────────────────────────────────────────
+/// Static catalogue of supported AI models. Seeded via migration.
+/// Drives the GET /api/v1/ai/models endpoint and validates POST /ai/run requests.
+model AiModel {
+  id          String   @id @db.VarChar(120)   // e.g. "groq/llama-3.1-8b-instant"
+  displayName String   @db.VarChar(80)
+  provider    String   @db.VarChar(40)         // Groq | Google | Mistral | OpenRouter | OpenAI
+  isEnabled   Boolean  @default(true)
+  isFree      Boolean  @default(true)
+  config      Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  insights    AIInsight[]
+
+  @@index([provider])
+  @@index([isEnabled])
+  @@map("ai_models")
+}
+
+// ── AI Usage (per-company quota tracker) ───────────────────────────────────
+/// One row per company. Upserted on every POST /ai/run.
+/// quotaRemaining resets via a scheduled job or billing event (out of scope here).
+model AiUsage {
+  id             String    @id @default(cuid())
+  companyId      String    @unique
+  totalRuns      Int       @default(0)
+  totalInsights  Int       @default(0)
+  tokensUsed     Int       @default(0)
+  quotaRemaining Int       @default(100)
+  lastRunAt      DateTime?
+  /// Last AI model used for a run, e.g. "groq/llama-3.1-8b-instant"
+  lastModelUsed  String?   @db.VarChar(120)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  company        Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@map("ai_usage")
+}
+
+// ── AI Insight ───────────────────────────────────────────────────────────────
+/// Persisted result from a single AI intelligence analysis run.
+/// Statistical results are stored in `data`; LLM summary overwrites `summary`
+/// once the optional OpenAI adapter runs.
+model AIInsight {
+  id          String   @id @default(cuid())
+  companyId   String
+  /// ANOMALY | FORECAST | COMPOSITE
+  insightType String   @default("COMPOSITE") @db.VarChar(50)
+  /// LOW | MEDIUM | HIGH | CRITICAL
+  severity    String   @db.VarChar(20)
+  title       String   @db.VarChar(255)
+  /// Template or LLM-generated narrative
+  summary     String?  @db.Text
+  /// Full structured analysis payload (JSON)
+  data        Json     @default("{}")
+  riskScore   Int      @default(0)
+  windowStart DateTime?
+  windowEnd   DateTime?
+  /// True once the LLM adapter has enriched this row
+  llmEnriched Boolean  @default(false)
+  isRead      Boolean  @default(false)
+  /// Which AI model generated this insight (null = statistical-only, no LLM)
+  modelId     String?  @db.VarChar(120)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  model       AiModel? @relation(fields: [modelId], references: [id])
+  modelUsages AIModelUsage[]
+
+  @@index([companyId])
+  @@index([companyId, createdAt(sort: Desc)])
+  @@index([companyId, severity])
+  @@index([companyId, isRead])
+  @@map("ai_insights")
+}
+
+// ── AI Model Usage ────────────────────────────────────────────────────────────
+/// Records every LLM API call for cost tracking and audit.
+/// Tenant-scoped when companyId is set; null = system-initiated call.
+model AIModelUsage {
+  id               String    @id @default(cuid())
+  companyId        String?
+  /// LLM model identifier, e.g. "gpt-4o-mini"
+  model            String    @db.VarChar(100)
+  promptTokens     Int       @default(0)
+  completionTokens Int       @default(0)
+  totalTokens      Int       @default(0)
+  /// USD cost, computed from token counts × model price
+  costUsd          Decimal?  @db.Decimal(10, 6)
+  /// E.g. "insight_summary" | "anomaly_explanation"
+  purpose          String    @db.VarChar(100)
+  insightId        String?   // soft link — no FK to survive insight deletion
+  durationMs       Int?      // wall-clock time of the API call
+  createdAt        DateTime  @default(now())
+
+  insight          AIInsight? @relation(fields: [insightId], references: [id], onDelete: SetNull)
+
+  @@index([companyId])
+  @@index([companyId, createdAt(sort: Desc)])
+  @@index([insightId])
+  @@map("ai_model_usage")
+}
+
+// ── Agent Action Proposal ─────────────────────────────────────────────────────
+/// One AI-generated action proposal per AIInsight anomaly.
+/// A human must approve before execution (requiresApproval = true by default).
+/// status: PROPOSED | APPROVED | REJECTED | EXECUTED | FAILED | CANCELLED
+model AgentActionProposal {
+  id               String    @id @default(uuid())
+  companyId        String
+  insightId        String
+  /// One of the whitelisted ActionType values (see domain/enums/ActionType.ts)
+  actionType       String    @db.VarChar(60)
+  /// 0-100 — AI-ranked priority; higher = act sooner
+  priorityScore    Float
+  /// 0-1 — model confidence in this proposal
+  confidenceScore  Float
+  /// Estimated USD revenue impact if executed
+  estimatedImpact  Float
+  /// Structured payload describing what will be done (never executed raw)
+  payload          Json      @default("{}")
+  /// Human-readable rationale from the LLM
+  rationale        String?   @db.Text
+  status           String    @default("PROPOSED") @db.VarChar(20)
+  requiresApproval Boolean   @default(true)
+  /// userId who approved / rejected
+  approvedBy       String?
+  approvedAt       DateTime?
+  executedAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  executionLogs AgentExecutionLog[]
+
+  @@index([companyId])
+  @@index([insightId])
+  @@index([companyId, status])
+  @@map("agent_action_proposals")
+}
+
+// ── Agent Execution Log ───────────────────────────────────────────────────────
+/// Immutable record of every execution attempt for a proposal.
+/// Written once — never updated after creation.
+model AgentExecutionLog {
+  id            String    @id @default(uuid())
+  companyId     String
+  proposalId    String
+  /// Mirrors the proposal actionType for fast queries
+  executionType String    @db.VarChar(60)
+  /// Input payload forwarded to the connector adapter
+  payload       Json
+  /// Output/result from the connector adapter
+  result        Json?
+  /// SUCCESS | FAILED | SKIPPED
+  status        String    @db.VarChar(20)
+  errorMessage  String?   @db.Text
+  durationMs    Int?
+  createdAt     DateTime  @default(now())
+
+  proposal AgentActionProposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([proposalId])
+  @@index([companyId, status])
+  @@map("agent_execution_logs")
+}
+
+// ── AI Recommendation ─────────────────────────────────────────────────────────
+/// AI-generated recommendations linked to insights.
+/// Tracks which LLM model + prompt version produced the recommendation,
+/// allowing reproducibility and A/B analysis across prompt iterations.
+model AIRecommendation {
+  id                 String   @id @default(cuid())
+  companyId          String
+  insightId          String
+  /// E.g. "RETRY_PAYMENT", "PRICING_ADJUSTMENT", "CHURN_INTERVENTION"
+  recommendationType String   @db.VarChar(60)
+  /// 0-1 — model confidence in this recommendation
+  confidence         Float
+  /// Estimated USD impact if recommendation is followed
+  impactScore        Float
+  /// LLM model identifier, e.g. "groq/llama-3.1-8b-instant"
+  llmModel           String   @db.VarChar(120)
+  /// Prompt template version, e.g. "v2.1" — for A/B tracking
+  promptVersion      String   @db.VarChar(30)
+  /// PENDING | ACCEPTED | REJECTED | IMPLEMENTED
+  status             String   @default("PENDING") @db.VarChar(20)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  company            Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([companyId, insightId])
+  @@index([companyId, status])
+  @@index([companyId, recommendationType])
+  @@map("ai_recommendations")
+}
+
+// ── Action Execution ──────────────────────────────────────────────────────────
+/// Idempotent record of every action execution attempt.
+/// The unique `idempotencyKey` prevents duplicate executions for the same
+/// logical action — critical for payment retries and financial operations.
+model ActionExecution {
+  id              String    @id @default(cuid())
+  companyId       String
+  /// References the AgentActionProposal or external action request
+  actionRequestId String
+  /// PENDING | RUNNING | SUCCESS | FAILED | SKIPPED
+  status          String    @default("PENDING") @db.VarChar(20)
+  executedAt      DateTime?
+  /// Structured JSON result from the action handler
+  result          Json?
+  /// Error message if status = FAILED
+  error           String?   @db.Text
+  /// Client-supplied idempotency key — prevents duplicate execution
+  idempotencyKey  String    @unique
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  company         Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([companyId, actionRequestId])
+  @@index([companyId, status])
+  @@map("action_executions")
+}
+
+// ── Feature Flags ─────────────────────────────────────────────────────────────
+/// Per-tenant feature flags for progressive rollout and A/B testing.
+/// Each (companyId, feature) pair is unique — one toggle per feature per tenant.
+model FeatureFlag {
+  id        String   @id @default(cuid())
+  companyId String
+  /// Feature key, e.g. "AI_AGENT", "STRIPE_V2", "BULK_EXPORT"
+  feature   String   @db.VarChar(100)
+  enabled   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, feature])
+  @@index([companyId])
+  @@map("feature_flags")
+}
+
+// ── Connector Sync Log ────────────────────────────────────────────────────────
+/// Records every connector sync operation for observability and debugging.
+/// One row per sync attempt — tracks records processed, errors, and duration.
+model ConnectorSyncLog {
+  id             String    @id @default(cuid())
+  companyId      String
+  /// Provider key, e.g. "STRIPE", "GITHUB", "CUSTOM"
+  connector      String    @db.VarChar(40)
+  /// SUCCESS | FAILED | PARTIAL
+  status         String    @db.VarChar(20)
+  recordsSynced  Int       @default(0)
+  error          String?   @db.Text
+  /// Sync duration in milliseconds
+  durationMs     Int?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  company        Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([companyId, connector])
+  @@index([companyId, createdAt(sort: Desc)])
+  @@map("connector_sync_logs")
+}
+// ── API Idempotency Key ───────────────────────────────────────────────────
+/// Stores recent idempotency keys to prevent duplicate POST mutations.
+/// TTL-based: a cron job or Prisma middleware can prune rows older than 24 h.
+model ApiIdempotencyKey {
+  id           String   @id @default(cuid())
+  /// Client-supplied idempotency key (sent in X-Idempotency-Key header)
+  key          String   @unique @db.VarChar(255)
+  companyId    String
+  /// HTTP method + path that produced this key
+  route        String   @db.VarChar(500)
+  /// HTTP status code of the cached response
+  statusCode   Int
+  /// Full JSON response body (cached)
+  responseBody Json
+  createdAt    DateTime @default(now())
+  /// Auto-expire after this timestamp (application-level; cron prunes)
+  expiresAt    DateTime
+
+  @@index([companyId])
+  @@index([expiresAt])
+  @@map("api_idempotency_keys")
+}
+
+// ── Dead Letter Event ─────────────────────────────────────────────────────────
+/// Events that exhausted retry attempts. Stored for manual inspection / replay.
+model DeadLetterEvent {
+  id           String   @id @default(cuid())
+  companyId    String
+  /// Source queue or connector name
+  source       String   @db.VarChar(100)
+  /// Original event type / action
+  eventType    String   @db.VarChar(100)
+  /// Original payload
+  payload      Json
+  /// Last error message
+  error        String?  @db.Text
+  /// Number of retry attempts exhausted
+  retryCount   Int      @default(0)
+  /// Has an operator manually retried or dismissed this?
+  resolved     Boolean  @default(false)
+  resolvedAt   DateTime?
+  resolvedBy   String?
+  createdAt    DateTime @default(now())
+
+  @@index([companyId])
+  @@index([companyId, source])
+  @@index([resolved])
+  @@map("dead_letter_events")
+}
+
+// ── Action Approval ───────────────────────────────────────────────────────────
+/// Implements double-approval for high-risk financial actions.
+/// Two distinct approvers (approver1 != approver2) must sign off before execution.
+model ActionApproval {
+  id           String    @id @default(cuid())
+  companyId    String
+  /// References AgentActionProposal.id
+  proposalId   String
+  /// First approver userId
+  approver1Id  String?
+  approver1At  DateTime?
+  /// Second approver userId (must differ from approver1Id)
+  approver2Id  String?
+  approver2At  DateTime?
+  /// PENDING_FIRST | PENDING_SECOND | FULLY_APPROVED | REJECTED
+  status       String    @default("PENDING_FIRST") @db.VarChar(30)
+  rejectedBy   String?
+  rejectedAt   DateTime?
+  rejectReason String?   @db.Text
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([proposalId])
+  @@index([companyId])
+  @@index([companyId, status])
+  @@map("action_approvals")
+}
+
+// ── AI Safety Log ─────────────────────────────────────────────────────────────
+/// Records every AI input/output pair for safety auditing.
+/// Flags hallucination risks, policy violations, and prompt injection attempts.
+model AiSafetyLog {
+  id                  String   @id @default(cuid())
+  companyId           String
+  /// Soft link back to the AIInsight this log was generated for (if applicable)
+  insightId           String?  @db.VarChar(30)
+  /// AI model used
+  model               String   @db.VarChar(120)
+  /// Truncated prompt (first 2000 chars)
+  promptSnippet       String   @db.Text
+  /// Truncated completion (first 2000 chars)
+  completionSnippet   String   @db.Text
+  /// Token counts
+  promptTokens        Int      @default(0)
+  completionTokens    Int      @default(0)
+  /// Duration in ms
+  durationMs          Int?
+  /// Safety flags
+  flaggedHallucination Boolean @default(false)
+  flaggedPolicyViolation Boolean @default(false)
+  flaggedPromptInjection Boolean @default(false)
+  /// Free-form safety notes from automated checks
+  safetyNotes         String?  @db.Text
+  /// SAFE | WARNING | BLOCKED
+  verdict             String   @default("SAFE") @db.VarChar(20)
+  createdAt           DateTime @default(now())
+
+  @@index([companyId])
+  @@index([companyId, createdAt(sort: Desc)])
+  @@index([verdict])
+  @@index([flaggedHallucination])
+  @@index([insightId])
+  @@map("ai_safety_logs")
+}
+// ── Background Job Log ────────────────────────────────────────────────────────
+
+model JobLog {
+  id          String    @id @default(cuid())
+  companyId   String?
+  jobName     String
+  jobId       String?
+  status      JobStatus @default(PENDING)
+  payload     Json      @default("{}")
+  result      Json?
+  error       String?
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([companyId])
+  @@index([jobName, status])
+  @@index([createdAt])
+}
+
+// ── Connector Health Monitoring ───────────────────────────────────────────────
+/// Tracks the health status and performance metrics of each provider connection.
+/// Updated after every sync operation. One row per (companyId, provider) pair.
+model ConnectorHealth {
+  id             String              @id @default(cuid())
+  companyId      String
+  provider       IntegrationProvider
+  /// HEALTHY | DEGRADED | FAILED
+  status         String              @default("HEALTHY") @db.VarChar(20)
+  lastSyncAt     DateTime?
+  /// Rolling error rate (0.0 – 1.0) over last N sync attempts
+  errorRate      Float               @default(0)
+  /// Average sync latency in milliseconds
+  avgLatencyMs   Float               @default(0)
+  /// Last error message (null when healthy)
+  lastError      String?             @db.Text
+  /// Number of consecutive failures (reset on success)
+  consecutiveFailures Int            @default(0)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  company        Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, provider])
+  @@index([companyId])
+  @@index([companyId, status])
+  @@map("connector_health")
+}
+
+// ── Webhook Event Log (Deduplication) ─────────────────────────────────────────
+/// Records every inbound webhook event for deduplication and replay protection.
+/// The unique (provider, eventId) constraint prevents duplicate processing.
+model WebhookEventLog {
+  id          String   @id @default(cuid())
+  provider    String   @db.VarChar(40)
+  eventId     String   @db.VarChar(255)
+  companyId   String?
+  payloadHash String   @db.VarChar(64)
+  receivedAt  DateTime @default(now())
+
+  @@unique([provider, eventId])
+  @@index([provider])
+  @@index([companyId])
+  @@index([receivedAt])
+  @@map("webhook_event_logs")
+}
+
+// ── Agent Execution Metrics ───────────────────────────────────────────────────
+/// Records aggregate metrics for each cron run of processAgentActions.
+/// Powers the Agent Dashboard metrics panel and execution analytics.
+model AgentExecutionMetrics {
+  id               String   @id @default(cuid())
+  runAt            DateTime @default(now())
+  totalProcessed   Int      @default(0)
+  successes        Int      @default(0)
+  failures         Int      @default(0)
+  skipped          Int      @default(0)
+  cancelled        Int      @default(0)
+  totalDurationMs  Int      @default(0)
+  avgDurationMs    Int      @default(0)
+  createdAt        DateTime @default(now())
+
+  @@index([runAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("agent_execution_metrics")
+}
